@@ -28,6 +28,11 @@ import {
 import type { ToolUseContext } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { getCwd } from '../../utils/cwd.js'
+import {
+  analyzeLocalImageWithVision,
+  isDashScopeAnthropic,
+  shouldConvertImageBlocks,
+} from '../../utils/dashscopeCompat.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from '../../utils/envUtils.js'
 import { getErrnoCode, isENOENT } from '../../utils/errors.js'
 import {
@@ -864,6 +869,55 @@ async function callInner(
 
   // --- Image (single read, no double-read) ---
   if (IMAGE_EXTENSIONS.has(ext)) {
+    // DashScope Anthropic-compatible endpoint and DeepSeek do not support
+    // image content blocks. Convert image to text via vision API instead.
+    if (shouldConvertImageBlocks()) {
+      context.nestedMemoryAttachmentTriggers?.add(fullFilePath)
+
+      let description: string
+      if (isDashScopeAnthropic()) {
+        try {
+          description = await analyzeLocalImageWithVision(
+            resolvedFilePath,
+            '请详细分析这张图片，描述界面、文字、布局、关键信息。',
+          )
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err)
+          console.error(
+            `[DASHSCOPE] Read image vision fallback failed: ${errorMsg}`,
+          )
+          description = `[图片无法识别: ${errorMsg}]`
+        }
+      } else {
+        // DeepSeek or other unsupported model — plain placeholder
+        description =
+          '[图片 — 当前模型不支持识图，无法查看图片内容。请切换到 Qwen/DashScope 模式。]'
+      }
+
+      const visionContent = `[图片识别结果：${path.basename(file_path)}]\n${description}`
+      const lineCount = visionContent.split('\n').length
+
+      const data = {
+        type: 'text' as const,
+        file: {
+          filePath: file_path,
+          content: visionContent,
+          numLines: lineCount,
+          startLine: 1,
+          totalLines: lineCount,
+        },
+      }
+
+      logFileOperation({
+        operation: 'read',
+        tool: 'FileReadTool',
+        filePath: fullFilePath,
+        content: description,
+      })
+
+      return { data }
+    }
+
     // Images have their own size limits (token budget + compression) —
     // don't apply the text maxSizeBytes cap.
     const data = await readImageWithTokenBudget(resolvedFilePath, maxTokens)

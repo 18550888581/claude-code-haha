@@ -99,6 +99,14 @@ import {
   extractQuotaStatusFromError,
   extractQuotaStatusFromHeaders,
 } from '../claudeAiLimits.js'
+import {
+  isDashScopeAnthropic,
+  logRequestStructure,
+  normalizeMessagesForDashScope,
+  normalizeUnsupportedBlocksBeforeDashScopeRequest,
+  assertNoUnsupportedBlocksSync,
+  shouldConvertImageBlocks,
+} from '../../utils/dashscopeCompat.js'
 import { getAPIContextManagement } from '../compact/apiMicrocompact.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -1314,6 +1322,19 @@ async function* queryModel(
     API_MAX_MEDIA_PER_REQUEST,
   )
 
+  // DashScope / non-vision endpoint normalization:
+  // Convert image/document blocks to text before sending to the API.
+  // DashScope's Anthropic-compatible endpoint and some other providers
+  // (e.g. DeepSeek) do not support image/document content block types
+  // and will return "Unexpected item type in content" if they are present.
+  if (shouldConvertImageBlocks()) {
+    messagesForAPI = await normalizeMessagesForDashScope(messagesForAPI)
+    // FINAL SWEEP: Deep recursive normalization to catch any image/document
+    // blocks that the first pass may have missed (e.g. deeply nested content,
+    // tool_result.content[].content[], or edge-case block formats).
+    messagesForAPI = await normalizeUnsupportedBlocksBeforeDashScopeRequest(messagesForAPI)
+  }
+
   // Instrumentation: Track message count after normalization
   logEvent('tengu_api_after_normalize', {
     postNormalizedMessageCount: messagesForAPI.length,
@@ -1696,17 +1717,38 @@ async function* queryModel(
 
     lastRequestBetas = betasParams
 
+    const finalMessages = addCacheBreakpoints(
+      messagesForAPI,
+      enablePromptCaching,
+      options.querySource,
+      useCachedMC,
+      consumedCacheEdits,
+      consumedPinnedEdits,
+      options.skipCacheWrite,
+    )
+
+    // Debug: log request structure when using DashScope
+    if (isDashScopeAnthropic()) {
+      logRequestStructure({
+        model: options.model,
+        messages: finalMessages,
+        max_tokens: maxOutputTokens,
+        tools_count: allTools.length,
+      })
+    }
+
+    // FINAL GUARD: Assert no unsupported content blocks remain in the request.
+    // This fires BEFORE the API call to prevent "Unexpected item type in content"
+    // errors from DashScope. If this assertion fails, it throws locally with
+    // detailed path information — no 400 error reaches the user.
+    assertNoUnsupportedBlocksSync(
+      finalMessages,
+      `DashScope API request (model: ${options.model})`,
+    )
+
     return {
       model: normalizeModelStringForAPI(options.model),
-      messages: addCacheBreakpoints(
-        messagesForAPI,
-        enablePromptCaching,
-        options.querySource,
-        useCachedMC,
-        consumedCacheEdits,
-        consumedPinnedEdits,
-        options.skipCacheWrite,
-      ),
+      messages: finalMessages,
       system,
       tools: allTools,
       tool_choice: options.toolChoice,
