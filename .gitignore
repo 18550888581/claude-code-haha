@@ -36,9 +36,9 @@ dist/
 build/
 __pycache__/
 *.py[cod]
-.venv/
-venv/
-env/
+/.venv/
+/venv/
+/env/
 .claude/
 .cursor/
 tmp/
