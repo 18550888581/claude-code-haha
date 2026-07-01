@@ -76,3 +76,6 @@ _资料与资源/
 *.zip
 *.7z
 *.rar
+
+# Codex GitHub upload guard extension
+open-slide-style-playground/
